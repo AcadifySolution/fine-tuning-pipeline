@@ -1,0 +1,34 @@
+# PEFT LoRA Configuration File
+# Optimized for Llama-3-8B-Instruct and similar transformer-based LLMs
+
+peft_type: LORA
+task_type: CAUSAL_LM
+
+# LoRA Hyperparameters
+r: 16                     # Rank dimension
+lora_alpha: 32            # Scaling factor (usually 2 * r)
+lora_dropout: 0.05        # Dropout probability for LoRA layers
+bias: "none"              # Bias training type ("none", "all", "lora_only")
+
+# Target Modules to apply LoRA adapter. 
+# Target projection layers of the attention blocks for optimal performance.
+target_modules:
+  - "q_proj"
+  - "k_proj"
+  - "v_proj"
+  - "o_proj"
+  - "gate_proj"
+  - "up_proj"
+  - "down_proj"
+
+# SFT Specific Training Params
+modules_to_save:
+  - "embed_tokens"
+  - "lm_head"
+
+# QLoRA Quantization Settings (Passed to model loader)
+quantization:
+  load_in_4bit: true
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_use_double_quant: true

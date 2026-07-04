@@ -1,0 +1,17 @@
+torch>=2.2.0
+torchvision
+torchaudio
+transformers>=4.40.0
+peft>=0.10.0
+accelerate>=0.29.0
+bitsandbytes>=0.43.0
+datasets>=2.18.0
+deepspeed>=0.14.0
+tensorboard>=2.16.0
+pyyaml>=6.0
+tqdm>=4.66.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+evaluate>=0.4.1
+numpy>=1.24.0
+packaging
