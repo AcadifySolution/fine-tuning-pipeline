@@ -75,13 +75,12 @@ class SFTDataset(Dataset):
         
         # Clone labels from input_ids. We will mask out prompt text with -100
         labels = input_ids.clone()
+        
+        # Mask out all tokens initially
+        labels.fill_(-100)
 
         # Label Masking: Only calculate loss on assistant turns.
-        # We find assistant sections by tokenizing segments.
-        self._mask_user_prompts(messages, labels)
-
-        # Set pad token labels to -100 as well
-        labels[attention_mask == 0] = -100
+        self._mask_user_prompts(input_ids, labels)
 
         return {
             "input_ids": input_ids,
@@ -89,39 +88,68 @@ class SFTDataset(Dataset):
             "labels": labels
         }
 
-    def _mask_user_prompts(self, messages: List[Dict[str, str]], labels: torch.Tensor):
+    def _mask_user_prompts(self, input_ids: torch.Tensor, labels: torch.Tensor):
         """
-        Calculates offsets and masks user roles, system rules, and prompts, setting their label indexes to -100.
+        Locates assistant response segments in input_ids and unmasks only those tokens (plus EOT/EOS) in labels.
+        Uses a robust token-matching search strategy to avoid BPE offset discrepancies.
         """
-        # Start matching tokens
-        curr_idx = 0
+        # Determine the response template and the end of turn token based on tokenizer
+        tokenizer_name = self.tokenizer.name_or_path.lower() if self.tokenizer.name_or_path else ""
         
-        # We loop through messages and calculate token indices to construct the label mask
-        for i, msg in enumerate(messages):
-            role = msg["role"]
-            content = msg["content"]
+        if "llama-3" in tokenizer_name or "llama3" in tokenizer_name:
+            response_template = "<|start_header_id|>assistant<|end_header_id|>\n\n"
+            eot_token = "<|eot_id|>"
+        elif "llama" in tokenizer_name:
+            response_template = "[/INST]"
+            eot_token = "</s>"
+        elif "qwen" in tokenizer_name or "chatml" in tokenizer_name:
+            response_template = "<|im_start|>assistant\n"
+            eot_token = "<|im_end|>"
+        else:
+            # Fallback default
+            response_template = "### Assistant:"
+            eot_token = self.tokenizer.eos_token if self.tokenizer.eos_token else "</s>"
 
-            # Tokenize individual message formatted as its own turn to see its length
-            # Note: Depending on tokenizer jinja settings, we construct exact tokens.
-            # For robustness, we reconstruct up to the target message segment.
-            segment_chat = self.tokenizer.apply_chat_template(
-                messages[:i+1],
-                tokenize=False,
-                add_generation_prompt=False
-            )
-            tokenized_segment = self.tokenizer(
-                segment_chat,
-                add_special_tokens=False,
-                return_tensors="pt"
-            )
-            segment_len = tokenized_segment["input_ids"].squeeze(0).size(0)
+        # Encode the templates to token IDs
+        # We use add_special_tokens=False to prevent prepending BOS tokens inside the sequence
+        response_tokens = self.tokenizer.encode(response_template, add_special_tokens=False)
+        
+        if isinstance(eot_token, int):
+            eot_token_id = eot_token
+        else:
+            eot_ids = self.tokenizer.encode(eot_token, add_special_tokens=False)
+            eot_token_id = eot_ids[-1] if eot_ids else self.tokenizer.eos_token_id
 
-            # If the current message role is user or system, mask out these tokens
-            if role in ["user", "system"]:
-                end_idx = min(segment_len, self.max_seq_length)
-                if curr_idx < end_idx:
-                    labels[curr_idx:end_idx] = -100
+        input_ids_list = input_ids.tolist()
+        n = len(input_ids_list)
+        m = len(response_tokens)
+        
+        if m == 0:
+            # If template cannot be encoded, fallback to full sequence training (standard SFT)
+            labels.copy_(input_ids)
+            # Still mask out pad tokens
+            labels[input_ids == self.tokenizer.pad_token_id] = -100
+            return
+
+        # Find all occurrences of response_tokens in input_ids
+        match_indices = []
+        for i in range(n - m + 1):
+            if input_ids_list[i : i + m] == response_tokens:
+                match_indices.append(i)
+
+        # For each matched assistant response, unmask the assistant's generation tokens
+        # from the end of response_tokens up to the corresponding EOT/EOS token.
+        for start_idx in match_indices:
+            response_start = start_idx + m
             
-            curr_idx = min(segment_len, self.max_seq_length)
-            if curr_idx >= self.max_seq_length:
-                break
+            # Find the next EOT or EOS token
+            response_end = n
+            for j in range(response_start, n):
+                if input_ids_list[j] == eot_token_id or input_ids_list[j] == self.tokenizer.eos_token_id:
+                    response_end = j + 1  # Include the EOT/EOS token in loss calculation
+                    break
+            
+            # Unmask this range in labels
+            if response_start < response_end:
+                labels[response_start:response_end] = input_ids[response_start:response_end]
+

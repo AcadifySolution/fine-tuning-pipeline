@@ -165,6 +165,16 @@ accelerate launch src/train.py \
     --output_dir "checkpoints/deepspeed_output"
 ```
 
+#### Option D: Merging LoRA Weights
+After fine-tuning is completed, merge the LoRA adapters back into the unquantized base model weights to generate a standalone model ready for deployment with high-throughput engines like vLLM or Hugging Face TGI:
+
+```bash
+python src/merge_peft.py \
+    --base_model_name "meta-llama/Meta-Llama-3-8B-Instruct" \
+    --adapter_dir "checkpoints/sft_model" \
+    --output_dir "checkpoints/merged_model"
+```
+
 ---
 
 ## ☁️ Deploying AWS SageMaker Infrastructure
