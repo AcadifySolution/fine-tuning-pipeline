@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acadify-fine-tuning-pipeline"
+version = "1.0.0"
+description = "Production-oriented LoRA/QLoRA SFT pipeline for causal language models"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = ["data/processed", "checkpoints", "runs", "logs"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
