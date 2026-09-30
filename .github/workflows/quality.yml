@@ -24,15 +24,15 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install lightweight tooling
+      - name: Install tooling
         run: python -m pip install --upgrade pip ruff black pytest pyyaml
       - name: Compile Python
-        run: python -m compileall -q data src
+        run: python -m compileall -q data src tests
       - name: Ruff
-        run: ruff check data src
+        run: ruff check data src tests
       - name: Black
-        run: black --check data src
-      - name: Validate JSON/YAML configuration
+        run: black --check data src tests
+      - name: Validate config files
         run: |
           python - <<'PY'
           import json
@@ -40,27 +40,17 @@ jobs:
           import yaml
           json.loads(Path("configs/deepspeed_zero3.json").read_text())
           yaml.safe_load(Path("configs/lora_config.yaml").read_text())
-          print("configuration files valid")
-          PY
-      - name: Import smoke test
-        run: python - <<'PY'
-          import sys
-          sys.path.insert(0, ".")
-          from data.dataset import SFTDataset
-          from data.preprocess import convert_to_messages_format
-          from src.model import prepare_model_for_lora
-          print("imports OK")
+          print("configuration valid")
           PY
       - name: Unit tests
         run: pytest -q
-        continue-on-error: true
 
   terraform-quality:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
-      - name: Terraform fmt
+      - name: Terraform format
         run: terraform fmt -check -recursive terraform
       - name: Terraform init
         working-directory: terraform
@@ -69,13 +59,13 @@ jobs:
         working-directory: terraform
         run: terraform validate
 
-  security:
+  codeql:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: CodeQL init
+      - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: python
-      - name: CodeQL analyze
+      - name: Analyze
         uses: github/codeql-action/analyze@v3
