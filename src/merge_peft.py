@@ -1,103 +1,69 @@
 """
-Script to merge trained LoRA adapter weights back into the base model.
-Enables high-performance serving by compiling adapters and base model into a single weight check.
+Merge a LoRA adapter into an unquantized base model.
 """
+from __future__ import annotations
 
-import os
 import argparse
 import logging
+from pathlib import Path
+
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-def parse_args():
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Merge LoRA weights into the base model.")
-    parser.add_argument(
-        "--base_model_name",
-        type=str,
-        required=True,
-        help="Path or Hugging Face model identifier of the original base model."
-    )
-    parser.add_argument(
-        "--adapter_dir",
-        type=str,
-        required=True,
-        help="Path to the directory containing the trained PEFT/LoRA adapter weights."
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        required=True,
-        help="Path to the directory where the full merged model will be saved."
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cpu",
-        help="Device to load model on ('cpu' or 'cuda'). CPU is recommended to avoid GPU VRAM limits."
-    )
-    parser.add_argument(
-        "--push_to_hub",
-        action="store_true",
-        help="If set, pushes the merged model to the Hugging Face Hub."
-    )
-    parser.add_argument(
-        "--hub_repo_id",
-        type=str,
-        default=None,
-        help="Hugging Face repo identifier if pushing to Hub (e.g. 'acadify-solution/llama-3-sft')."
-    )
+    parser.add_argument("--base_model_name", required=True)
+    parser.add_argument("--adapter_dir", required=True)
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--push_to_hub", action="store_true")
+    parser.add_argument("--hub_repo_id")
     return parser.parse_args()
 
-def main():
+
+def main() -> None:
     args = parse_args()
-    
-    logger.info("Loading base model: %s on device: %s", args.base_model_name, args.device)
-    
-    # We load base model in FP16 or BF16 (matching the target precision)
-    # Quantized models CANNOT be merged directly; hence we load the unquantized base model.
-    torch_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-    
-    base_model = AutoModelForCausalLM.from_pretrained(
+    if args.push_to_hub and not args.hub_repo_id:
+        raise ValueError("--hub_repo_id is required with --push_to_hub")
+
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda requested but CUDA is not available")
+
+    dtype = torch.float32 if args.device == "cpu" else (
+        torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    )
+    logger.info("Loading base model %s on %s", args.base_model_name, args.device)
+    base = AutoModelForCausalLM.from_pretrained(
         args.base_model_name,
+        torch_dtype=dtype,
         device_map=args.device,
-        torch_dtype=torch_dtype,
-        trust_remote_code=True
+        trust_remote_code=False,
     )
-    
-    logger.info("Loading tokenizer matching base model...")
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model_name, trust_remote_code=True)
-    
-    logger.info("Loading PEFT model with adapter from: %s", args.adapter_dir)
-    # Wrap base model with adapter layers
-    model = PeftModel.from_pretrained(
-        base_model,
-        args.adapter_dir,
-        device_map=args.device,
-        torch_dtype=torch_dtype
-    )
-    
-    logger.info("Merging LoRA adapters into the base model weights...")
-    # This modifies the base model in-place and removes adapter layers
-    merged_model = model.merge_and_unload()
-    
-    logger.info("Saving merged model and tokenizer to: %s", args.output_dir)
-    os.makedirs(args.output_dir, exist_ok=True)
-    merged_model.save_pretrained(args.output_dir, max_shard_size="5GB")
-    tokenizer.save_pretrained(args.output_dir)
-    
-    logger.info("Model merge successfully completed!")
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model_name, trust_remote_code=False)
+    adapter_path = Path(args.adapter_dir)
+    if not adapter_path.is_dir():
+        raise FileNotFoundError(f"Adapter directory not found: {adapter_path}")
+
+    model = PeftModel.from_pretrained(base, str(adapter_path), is_trainable=False)
+    merged = model.merge_and_unload()
+
+    output = Path(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    merged.save_pretrained(output, max_shard_size="5GB", safe_serialization=True)
+    tokenizer.save_pretrained(output)
 
     if args.push_to_hub:
-        if not args.hub_repo_id:
-            raise ValueError("Must provide --hub_repo_id when --push_to_hub is active.")
-        logger.info("Pushing merged model to Hugging Face Hub repo: %s", args.hub_repo_id)
-        merged_model.push_to_hub(args.hub_repo_id)
+        logger.info("Pushing merged model to %s", args.hub_repo_id)
+        merged.push_to_hub(args.hub_repo_id, safe_serialization=True)
         tokenizer.push_to_hub(args.hub_repo_id)
-        logger.info("Successfully uploaded merged model to Hugging Face Hub.")
+
+    logger.info("Merged model written to %s", output)
+
 
 if __name__ == "__main__":
     main()
