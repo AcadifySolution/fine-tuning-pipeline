@@ -1,21 +1,19 @@
 # Security
 
-## Scope
+This repository handles external model/dataset sources and generates high-value model artifacts.
 
-This repository trains and packages models from external model and dataset sources. Security therefore includes source trust, dependency integrity, dataset handling, credentials, artifact integrity, and cloud IAM.
+## Baseline controls
 
-## Rules
-
-- Never commit Hugging Face, AWS, or other access tokens.
-- Treat model and dataset identifiers as untrusted inputs and review licenses/terms before use.
-- Keep `trust_remote_code=False` unless a specific model requires reviewed custom code.
-- Keep datasets and checkpoints outside Git; the repository ignores common model/data artifacts.
-- Prefer short-lived AWS credentials and least-privilege IAM roles.
-- Do not expose generated checkpoints or logs publicly unless intentionally published.
-- Pin or lock production dependencies in a deployment environment before repeatable production training.
-- Validate Terraform before applying it and review IAM/network changes.
-- Do not treat validation loss alone as model quality; pair it with task-specific evaluation before deployment.
+- Never commit Hugging Face, AWS, or other credentials.
+- Review model and dataset provenance, license, and remote-code requirements.
+- Keep `trust_remote_code=False` unless required code has been reviewed.
+- Keep datasets and checkpoints outside Git.
+- Use short-lived AWS credentials and least-privilege IAM roles.
+- Validate Terraform before deployment and review all IAM/network changes.
+- Treat training data, logs, and checkpoints as potentially sensitive.
+- Pin or lock production dependencies and record the environment used for each training run.
+- Validate task-specific quality and safety before deploying a fine-tuned model.
 
 ## Reporting
 
-Report suspected vulnerabilities privately to the repository maintainers rather than publishing exploit details in an issue.
+Report suspected security issues privately to the maintainers rather than publishing exploit details in an issue.
