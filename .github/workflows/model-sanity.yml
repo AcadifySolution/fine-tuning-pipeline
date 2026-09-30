@@ -1,0 +1,35 @@
+name: Model Pipeline Sanity
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sanity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU test stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch transformers peft pyyaml
+      - name: Synthetic dataset sanity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("/tmp/sanity.jsonl")
+          rows = [
+              {"messages": [{"role":"user","content":"2+2?"},{"role":"assistant","content":"4"}]},
+              {"messages": [{"role":"user","content":"Name a color."},{"role":"assistant","content":"Blue."}]},
+          ]
+          p.write_text("".join(json.dumps(x)+"\n" for x in rows))
+          print(p)
+          PY
+      - name: Compile project
+        run: python -m compileall -q data src
