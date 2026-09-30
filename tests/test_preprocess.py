@@ -8,11 +8,10 @@ def test_messages_schema_is_preserved():
             {"role": "assistant", "content": "Hi"},
         ]
     }
-    result = convert_to_messages_format(sample)
-    assert result["messages"] == sample["messages"]
+    assert convert_to_messages_format(sample)["messages"] == sample["messages"]
 
 
-def test_instruction_response_fallback():
+def test_instruction_fallback():
     result = convert_to_messages_format({"instruction": "Question", "output": "Answer"})
     assert result["messages"] == [
         {"role": "user", "content": "Question"},
@@ -20,5 +19,8 @@ def test_instruction_response_fallback():
     ]
 
 
-def test_empty_or_invalid_examples_are_rejected():
-    assert convert_to_messages_format({"messages": [{"role": "system", "content": ""}]})["messages"] == []
+def test_invalid_messages_are_removed():
+    result = convert_to_messages_format(
+        {"messages": [{"role": "developer", "content": "ignored"}]}
+    )
+    assert result["messages"] == []
