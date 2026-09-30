@@ -1,64 +1,95 @@
 """
-Fine-tuning execution script.
-Supports distributed training via Accelerate/DeepSpeed and custom PyTorch / HF Trainer pipelines.
-"""
+Production-oriented SFT training entry point.
 
-import os
-import sys
+Supports Hugging Face Trainer (default) and an Accelerate custom loop.
+"""
+from __future__ import annotations
+
 import argparse
-import yaml
+import json
 import logging
-from tqdm import tqdm
+import math
+import os
+from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
-from transformers import (
-    TrainingArguments,
-    Trainer,
-    DataCollatorForSeq2Seq,
-    default_data_collator,
-    get_scheduler
-)
+import yaml
 from accelerate import Accelerator
-
-# Add repository root to path for absolute imports in SageMaker
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments, get_scheduler
 
 from data.dataset import SFTDataset
-from src.model import load_tokenizer, load_model, prepare_model_for_lora
-from src.utils import set_seed, log_gpu_memory, count_trainable_parameters
+from src.model import load_model, load_tokenizer, prepare_model_for_lora
+from src.utils import count_trainable_parameters, log_gpu_memory, set_seed, write_run_manifest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Fine-tune open-source LLMs.")
-    parser.add_argument("--model_id", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct", help="Hugging Face model identifier.")
-    parser.add_argument("--train_path", type=str, required=True, help="Path to SFT train JSONL dataset.")
-    parser.add_argument("--val_path", type=str, required=True, help="Path to SFT validation JSONL dataset.")
-    parser.add_argument("--lora_config", type=str, default="configs/lora_config.yaml", help="Path to LoRA YAML config file.")
-    parser.add_argument("--deepspeed_config", type=str, default=None, help="Path to DeepSpeed JSON configuration file.")
-    parser.add_argument("--output_dir", type=str, default="checkpoints/sft_model", help="Directory to save checkpoint models.")
-    parser.add_argument("--learning_rate", type=float, default=2e-4, help="Peak learning rate during fine-tuning.")
-    parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs.")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="Micro-batch size per device for training.")
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=4, help="Micro-batch size per device for evaluation.")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Steps before applying backward pass and optimizer step.")
-    parser.add_argument("--max_seq_length", type=int, default=2048, help="Max sequence length configuration for tokenizer.")
-    parser.add_argument("--run_custom_loop", action="store_true", help="If True, runs custom PyTorch loop with Accelerate. If False, runs Hugging Face Trainer.")
-    parser.add_argument("--seed", type=int, default=42, help="Deterministic training seed.")
-    
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fine-tune a causal language model with LoRA/QLoRA.")
+    parser.add_argument("--model_id", default="meta-llama/Meta-Llama-3-8B-Instruct")
+    parser.add_argument("--train_path", required=True)
+    parser.add_argument("--val_path", required=True)
+    parser.add_argument("--lora_config", default="configs/lora_config.yaml")
+    parser.add_argument("--deepspeed_config")
+    parser.add_argument("--output_dir", default="checkpoints/sft_model")
+    parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument("--num_epochs", type=int, default=3)
+    parser.add_argument("--per_device_train_batch_size", type=int, default=4)
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=4)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--max_seq_length", type=int, default=2048)
+    parser.add_argument("--run_custom_loop", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--save_only_model", action="store_true")
     return parser.parse_args()
 
+
+def _validate_args(args: argparse.Namespace) -> None:
+    positive = [
+        ("num_epochs", args.num_epochs),
+        ("per_device_train_batch_size", args.per_device_train_batch_size),
+        ("per_device_eval_batch_size", args.per_device_eval_batch_size),
+        ("gradient_accumulation_steps", args.gradient_accumulation_steps),
+        ("max_seq_length", args.max_seq_length),
+    ]
+    for name, value in positive:
+        if value <= 0:
+            raise ValueError(f"{name} must be greater than zero")
+    if args.learning_rate <= 0:
+        raise ValueError("learning_rate must be greater than zero")
+    if args.seed < 0:
+        raise ValueError("seed must be non-negative")
+    if args.num_workers < 0:
+        raise ValueError("num_workers must be non-negative")
+
+
+def _precision_flags() -> tuple[bool, bool]:
+    if not torch.cuda.is_available():
+        return False, False
+    bf16 = torch.cuda.is_bf16_supported()
+    return bf16, not bf16
+
+
+def _build_collator(tokenizer, model, max_seq_length: int):
+    return DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=model,
+        padding="max_length",
+        max_length=max_seq_length,
+        label_pad_token_id=-100,
+    )
+
+
 def run_hf_trainer(args, model, tokenizer, train_dataset, val_dataset):
-    """
-    Orchestrates training using Hugging Face Trainer API.
-    """
-    logger.info("Starting SFT training using Hugging Face Trainer...")
-    
-    training_args = TrainingArguments(
+    bf16, fp16 = _precision_flags()
+    training_kwargs = dict(
         output_dir=args.output_dir,
-        overwrite_output_dir=True,
+        overwrite_output_dir=False,
         num_train_epochs=args.num_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
@@ -66,192 +97,188 @@ def run_hf_trainer(args, model, tokenizer, train_dataset, val_dataset):
         learning_rate=args.learning_rate,
         weight_decay=0.01,
         warmup_ratio=0.03,
+        lr_scheduler_type="cosine",
         logging_steps=10,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
-        bf16=torch.cuda.is_bf16_supported(),
-        fp16=not torch.cuda.is_bf16_supported(),
+        bf16=bf16,
+        fp16=fp16,
         deepspeed=args.deepspeed_config,
         report_to=["tensorboard"],
-        dataloader_num_workers=4,
+        dataloader_num_workers=args.num_workers,
         logging_dir=os.path.join(args.output_dir, "logs"),
-        disable_tqdm=False
+        save_safetensors=True,
+        gradient_checkpointing=True,
+        remove_unused_columns=False,
     )
-
-    # Use data collator designed for sequence-to-sequence generation (which also handles label padding)
-    data_collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer,
-        model=model,
-        padding="max_length",
-        max_length=args.max_seq_length,
-        label_pad_token_id=-100
-    )
-
+    training_args = TrainingArguments(**training_kwargs)
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
+        processing_class=tokenizer,
+        data_collator=_build_collator(tokenizer, model, args.max_seq_length),
     )
-
     trainer.train()
-    
-    # Save the final adapter model weights
-    logger.info("Training complete. Saving final LoRA adapter...")
-    model.save_pretrained(args.output_dir)
+    trainer.save_model(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
+    return trainer
+
 
 def run_custom_accelerator_loop(args, model, tokenizer, train_dataset, val_dataset):
-    """
-    Orchestrates training using a custom PyTorch loop wrapped in Accelerate for full control.
-    """
-    logger.info("Starting training using Custom PyTorch + Accelerate loop...")
-    
-    # Initialize the Accelerator
     accelerator = Accelerator(
-        mixed_precision="bf16" if torch.cuda.is_bf16_supported() else "fp16",
-        gradient_accumulation_steps=args.gradient_accumulation_steps
+        mixed_precision="bf16" if _precision_flags()[0] else ("fp16" if torch.cuda.is_available() else "no"),
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
-    
-    # Create DataLoaders
-    # Custom SFTDataset handles formatting, so we can use standard collator
-    data_collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer,
-        model=model,
-        padding="max_length",
-        max_length=args.max_seq_length,
-        label_pad_token_id=-100
-    )
-    
-    train_dataloader = DataLoader(
+    collator = _build_collator(tokenizer, model, args.max_seq_length)
+    train_loader = DataLoader(
         train_dataset,
         batch_size=args.per_device_train_batch_size,
         shuffle=True,
-        collate_fn=data_collator
+        collate_fn=collator,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
     )
-    val_dataloader = DataLoader(
+    val_loader = DataLoader(
         val_dataset,
         batch_size=args.per_device_eval_batch_size,
         shuffle=False,
-        collate_fn=data_collator
+        collate_fn=collator,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
     )
 
-    # Setup Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
-
-    # Calculate training steps
-    num_update_steps_per_epoch = len(train_dataloader) // args.gradient_accumulation_steps
-    total_training_steps = args.num_epochs * num_update_steps_per_epoch
-
-    # Setup Scheduler
-    lr_scheduler = get_scheduler(
-        name="cosine",
+    optimizer = torch.optim.AdamW(
+        (p for p in model.parameters() if p.requires_grad),
+        lr=args.learning_rate,
+        weight_decay=0.01,
+    )
+    steps_per_epoch = max(1, math.ceil(len(train_loader) / args.gradient_accumulation_steps))
+    total_steps = args.num_epochs * steps_per_epoch
+    scheduler = get_scheduler(
+        "cosine",
         optimizer=optimizer,
-        num_warmup_steps=int(0.03 * total_training_steps),
-        num_training_steps=total_training_steps
+        num_warmup_steps=max(1, int(0.03 * total_steps)),
+        num_training_steps=total_steps,
     )
 
-    # Prepare for distributed execution
-    model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, val_dataloader, lr_scheduler
+    model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
+        model, optimizer, train_loader, val_loader, scheduler
     )
 
-    logger.info("***** Running training loop *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num Epochs = {args.num_epochs}")
-    logger.info(f"  Total optimization steps = {total_training_steps}")
-    
-    # Track metrics
-    progress_bar = tqdm(range(total_training_steps), disable=not accelerator.is_local_main_process)
-    completed_steps = 0
-
+    global_step = 0
     for epoch in range(args.num_epochs):
         model.train()
-        total_loss = 0
-        
-        for step, batch in enumerate(train_dataloader):
+        running_loss = 0.0
+        update_count = 0
+        progress = tqdm(total=steps_per_epoch, disable=not accelerator.is_local_main_process)
+
+        for step, batch in enumerate(train_loader):
             with accelerator.accumulate(model):
                 outputs = model(**batch)
                 loss = outputs.loss
-                total_loss += loss.detach().float()
-                
+                running_loss += float(loss.detach().item())
                 accelerator.backward(loss)
                 optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                
-            # Check if gradient updates happened
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+
             if accelerator.sync_gradients:
-                progress_bar.update(1)
-                completed_steps += 1
-                
-                if completed_steps % 10 == 0 and accelerator.is_local_main_process:
-                    current_loss = total_loss.item() / (step + 1)
-                    logger.info(f"Epoch {epoch} | Step {completed_steps} | Loss: {current_loss:.4f} | LR: {lr_scheduler.get_last_lr()[0]:.6e}")
+                global_step += 1
+                update_count += 1
+                progress.update(1)
+                if global_step % 10 == 0 and accelerator.is_local_main_process:
+                    logger.info(
+                        "epoch=%d step=%d train_loss=%.4f lr=%.6e",
+                        epoch + 1,
+                        global_step,
+                        running_loss / max(1, step + 1),
+                        scheduler.get_last_lr()[0],
+                    )
                     log_gpu_memory()
 
-        # Run validation per epoch
+        progress.close()
+
         model.eval()
-        val_loss = 0
-        for batch in val_dataloader:
+        val_total = torch.tensor(0.0, device=accelerator.device)
+        val_batches = torch.tensor(0.0, device=accelerator.device)
+        for batch in val_loader:
             with torch.no_grad():
-                outputs = model(**batch)
-                loss = outputs.loss
-                val_loss += loss.detach().float()
-                
-        # Gather losses across all GPUs in multi-GPU distributed settings
-        val_loss = accelerator.gather(val_loss).mean().item() / len(val_dataloader)
+                val_total += model(**batch).loss.detach()
+                val_batches += 1
+
+        gathered = accelerator.gather_for_metrics(torch.stack([val_total, val_batches]))
+        val_loss = gathered[0].sum().item() / max(1.0, gathered[1].sum().item())
+
         if accelerator.is_local_main_process:
-            logger.info(f"--- Epoch {epoch} Validation Loss: {val_loss:.4f} ---")
-            
-            # Save Checkpoint
-            epoch_output_dir = os.path.join(args.output_dir, f"epoch_{epoch}")
-            os.makedirs(epoch_output_dir, exist_ok=True)
-            
-            # Unwrap model for standard state_dict saving
-            unwrapped_model = accelerator.unwrap_model(model)
-            unwrapped_model.save_pretrained(
-                epoch_output_dir,
+            logger.info("epoch=%d val_loss=%.4f", epoch + 1, val_loss)
+            epoch_dir = Path(args.output_dir) / f"epoch_{epoch + 1}"
+            epoch_dir.mkdir(parents=True, exist_ok=True)
+            unwrapped = accelerator.unwrap_model(model)
+            unwrapped.save_pretrained(
+                epoch_dir,
                 is_main_process=accelerator.is_main_process,
                 save_function=accelerator.save,
+                safe_serialization=True,
             )
-            tokenizer.save_pretrained(epoch_output_dir)
+            tokenizer.save_pretrained(epoch_dir)
+
+    accelerator.wait_for_everyone()
+    if accelerator.is_local_main_process:
+        final_dir = Path(args.output_dir) / "final"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        accelerator.unwrap_model(model).save_pretrained(
+            final_dir,
+            is_main_process=True,
+            save_function=accelerator.save,
+            safe_serialization=True,
+        )
+        tokenizer.save_pretrained(final_dir)
+
 
 def main():
     args = parse_args()
-    set_seed(args.seed)
-    
-    # Load LoRA configuration
-    with open(args.lora_config, "r") as f:
-        lora_config_dict = yaml.safe_load(f)
+    _validate_args(args)
+    set_seed(args.seed, deterministic=args.deterministic)
 
-    # 1. Load Tokenizer & Model
+    with open(args.lora_config, "r", encoding="utf-8") as handle:
+        lora_config = yaml.safe_load(handle) or {}
+
     tokenizer = load_tokenizer(args.model_id)
     model = load_model(
-        model_id=args.model_id,
-        quantization_config=lora_config_dict.get("quantization"),
-        use_gradient_checkpointing=True
+        args.model_id,
+        quantization_config=lora_config.get("quantization"),
+        use_gradient_checkpointing=True,
     )
-    
-    # 2. Prepare Model for LoRA (Quantization and Adapter wrapper)
-    model = prepare_model_for_lora(model, lora_config_dict)
-    
-    # Print architecture metrics
+    model = prepare_model_for_lora(model, lora_config)
     count_trainable_parameters(model)
 
-    # 3. Load Datasets
-    logger.info("Initializing SFT Train Dataset...")
     train_dataset = SFTDataset(args.train_path, tokenizer, args.max_seq_length)
-    logger.info("Initializing SFT Validation Dataset...")
     val_dataset = SFTDataset(args.val_path, tokenizer, args.max_seq_length)
 
-    # 4. Trigger Training Loop
+    manifest = {
+        "model_id": args.model_id,
+        "train_path": os.path.abspath(args.train_path),
+        "val_path": os.path.abspath(args.val_path),
+        "lora_config": os.path.abspath(args.lora_config),
+        "output_dir": os.path.abspath(args.output_dir),
+        "seed": args.seed,
+        "deterministic": args.deterministic,
+        "max_seq_length": args.max_seq_length,
+        "train_examples": len(train_dataset),
+        "val_examples": len(val_dataset),
+        "cuda_available": torch.cuda.is_available(),
+        "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        "torch_version": torch.__version__,
+    }
+    write_run_manifest(args.output_dir, manifest)
+
     if args.run_custom_loop:
         run_custom_accelerator_loop(args, model, tokenizer, train_dataset, val_dataset)
     else:
         run_hf_trainer(args, model, tokenizer, train_dataset, val_dataset)
+
 
 if __name__ == "__main__":
     main()
