@@ -1,6 +1,7 @@
 """
 Validated SFT dataset with chat-template formatting and assistant-only loss masking.
 """
+
 from __future__ import annotations
 
 import json
@@ -114,9 +115,7 @@ class SFTDataset(Dataset):
             if message.get("role") != "assistant":
                 continue
 
-            prefix_messages = messages[:index] + [
-                {"role": "assistant", "content": ""}
-            ]
+            prefix_messages = messages[:index] + [{"role": "assistant", "content": ""}]
             try:
                 prefix_text = self.tokenizer.apply_chat_template(
                     prefix_messages,
@@ -129,14 +128,16 @@ class SFTDataset(Dataset):
                     add_generation_prompt=False,
                 )
             except Exception as exc:
-                raise ValueError(f"Unable to render chat template for assistant turn {index}") from exc
+                raise ValueError(
+                    f"Unable to render chat template for assistant turn {index}"
+                ) from exc
 
             prefix_ids = self.tokenizer.encode(prefix_text, add_special_tokens=False)
             full_ids = self.tokenizer.encode(full_text, add_special_tokens=False)
             if not prefix_ids or len(full_ids) <= len(prefix_ids):
                 continue
 
-            content_ids = full_ids[len(prefix_ids):]
+            content_ids = full_ids[len(prefix_ids) :]
             match_start = _find_subsequence(ids, content_ids, start=cursor)
             if match_start is None:
                 continue
@@ -151,6 +152,6 @@ def _find_subsequence(sequence: list[int], needle: list[int], start: int = 0) ->
         return None
     limit = len(sequence) - len(needle) + 1
     for index in range(max(0, start), max(0, limit)):
-        if sequence[index:index + len(needle)] == needle:
+        if sequence[index : index + len(needle)] == needle:
             return index
     return None

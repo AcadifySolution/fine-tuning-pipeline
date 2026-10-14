@@ -149,9 +149,9 @@ resource "aws_sagemaker_model" "finetuned_model" {
   execution_role_arn = aws_iam_role.sagemaker_execution_role.arn
 
   primary_container {
-    image = "763104351884.dkr.ecr.us-east-1.amazonaws.com/huggingface-pytorch-tgi-inference:2.1.1-tgi1.4.0-gpu-py310-cu121-ubuntu20.04" # Official HF TGI Container
+    image          = "763104351884.dkr.ecr.us-east-1.amazonaws.com/huggingface-pytorch-tgi-inference:2.1.1-tgi1.4.0-gpu-py310-cu121-ubuntu20.04" # Official HF TGI Container
     model_data_url = "s3://${aws_s3_bucket.model_bucket.id}/checkpoints/sft_model/model.tar.gz"
-    
+
     environment = {
       HF_MODEL_ID      = var.model_id
       HF_TASK          = "text-generation"
