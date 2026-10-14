@@ -3,10 +3,10 @@ Production-oriented SFT training entry point.
 
 Supports Hugging Face Trainer (default) and an Accelerate custom loop.
 """
+
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import math
 import os
@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fine-tune a causal language model with LoRA/QLoRA.")
+    parser = argparse.ArgumentParser(
+        description="Fine-tune a causal language model with LoRA/QLoRA."
+    )
     parser.add_argument("--model_id", default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--train_path", required=True)
     parser.add_argument("--val_path", required=True)
@@ -87,30 +89,30 @@ def _build_collator(tokenizer, model, max_seq_length: int):
 
 def run_hf_trainer(args, model, tokenizer, train_dataset, val_dataset):
     bf16, fp16 = _precision_flags()
-    training_kwargs = dict(
-        output_dir=args.output_dir,
-        overwrite_output_dir=False,
-        num_train_epochs=args.num_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        weight_decay=0.01,
-        warmup_ratio=0.03,
-        lr_scheduler_type="cosine",
-        logging_steps=10,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        bf16=bf16,
-        fp16=fp16,
-        deepspeed=args.deepspeed_config,
-        report_to=["tensorboard"],
-        dataloader_num_workers=args.num_workers,
-        logging_dir=os.path.join(args.output_dir, "logs"),
-        save_safetensors=True,
-        gradient_checkpointing=True,
-        remove_unused_columns=False,
-    )
+    training_kwargs = {
+        "output_dir": args.output_dir,
+        "overwrite_output_dir": False,
+        "num_train_epochs": args.num_epochs,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "weight_decay": 0.01,
+        "warmup_ratio": 0.03,
+        "lr_scheduler_type": "cosine",
+        "logging_steps": 10,
+        "eval_strategy": "epoch",
+        "save_strategy": "epoch",
+        "bf16": bf16,
+        "fp16": fp16,
+        "deepspeed": args.deepspeed_config,
+        "report_to": ["tensorboard"],
+        "dataloader_num_workers": args.num_workers,
+        "logging_dir": os.path.join(args.output_dir, "logs"),
+        "save_safetensors": True,
+        "gradient_checkpointing": True,
+        "remove_unused_columns": False,
+    }
     training_args = TrainingArguments(**training_kwargs)
     trainer = Trainer(
         model=model,
@@ -128,7 +130,9 @@ def run_hf_trainer(args, model, tokenizer, train_dataset, val_dataset):
 
 def run_custom_accelerator_loop(args, model, tokenizer, train_dataset, val_dataset):
     accelerator = Accelerator(
-        mixed_precision="bf16" if _precision_flags()[0] else ("fp16" if torch.cuda.is_available() else "no"),
+        mixed_precision=(
+            "bf16" if _precision_flags()[0] else ("fp16" if torch.cuda.is_available() else "no")
+        ),
         gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
     collator = _build_collator(tokenizer, model, args.max_seq_length)

@@ -4,12 +4,12 @@ Dataset preparation for supervised fine-tuning.
 The script normalizes common instruction/chat dataset schemas into:
 {"messages": [{"role": "...", "content": "..."}]}
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,9 @@ MAX_MESSAGE_CHARS = 200_000
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Normalize and split an SFT dataset.")
-    parser.add_argument("--dataset_name", required=True, help="HF dataset id or local JSON/JSONL path.")
+    parser.add_argument(
+        "--dataset_name", required=True, help="HF dataset id or local JSON/JSONL path."
+    )
     parser.add_argument("--output_dir", default="data/processed")
     parser.add_argument("--test_split_size", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -88,7 +90,11 @@ def _load_examples(source: str) -> list[dict[str, Any]]:
     path = Path(source)
     if path.exists():
         if path.suffix.lower() == ".jsonl":
-            return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            return [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
         if path.suffix.lower() == ".json":
             payload = json.loads(path.read_text(encoding="utf-8"))
             return payload if isinstance(payload, list) else payload.get("data", [])

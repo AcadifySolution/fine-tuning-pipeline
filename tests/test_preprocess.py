@@ -20,7 +20,5 @@ def test_instruction_fallback():
 
 
 def test_invalid_messages_are_removed():
-    result = convert_to_messages_format(
-        {"messages": [{"role": "developer", "content": "ignored"}]}
-    )
+    result = convert_to_messages_format({"messages": [{"role": "developer", "content": "ignored"}]})
     assert result["messages"] == []

@@ -1,6 +1,7 @@
 """
 Merge a LoRA adapter into an unquantized base model.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,8 +35,10 @@ def main() -> None:
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda requested but CUDA is not available")
 
-    dtype = torch.float32 if args.device == "cpu" else (
-        torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    dtype = (
+        torch.float32
+        if args.device == "cpu"
+        else (torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
     )
     logger.info("Loading base model %s on %s", args.base_model_name, args.device)
     base = AutoModelForCausalLM.from_pretrained(
