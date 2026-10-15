@@ -1,20 +1,30 @@
-# Acadify Fine-Tuning Pipeline
+# LLM Fine-Tuning Pipeline — LoRA and QLoRA with PyTorch
 
 A production-oriented supervised fine-tuning (SFT) pipeline for causal language models with LoRA/QLoRA, Accelerate, DeepSpeed ZeRO-3, dataset normalization, run manifests, and AWS SageMaker/Terraform integration.
 
 Core training stays framework-native: Hugging Face Transformers + PEFT + Accelerate.
 
+## Choose a starting point
+
+Start with [dataset preparation](data/) and [training configurations](configs/)
+before launching a GPU job. The [tests](tests/) cover local preprocessing and
+utility behavior; they do not establish model quality or training performance.
+
+Use [AI Evals Framework](https://github.com/AcadifySolution/ai-evals-framework)
+to plan a held-out evaluation before comparing a base model with a tuned model.
+Read the hardware, dependency, and cloud requirements below before running training.
+
 ## Capabilities
 
-| Area | Capability |
-|---|---|
-| Fine-tuning | LoRA / QLoRA, assistant-only loss masking |
-| Models | Hugging Face causal LMs with explicit chat-template validation |
-| Scaling | Single GPU, multi-GPU, Accelerate, optional DeepSpeed |
-| Data | JSON/JSONL/HF normalization, schema filtering, deterministic split |
-| Reproducibility | Seed control and per-run run_manifest.json |
-| Artifacts | Safe-serialization model checkpoints |
-| Quality | Ruff, Black, config validation, tests, CodeQL, Terraform validation |
+| Area            | Capability                                                          |
+| --------------- | ------------------------------------------------------------------- |
+| Fine-tuning     | LoRA / QLoRA, assistant-only loss masking                           |
+| Models          | Hugging Face causal LMs with explicit chat-template validation      |
+| Scaling         | Single GPU, multi-GPU, Accelerate, optional DeepSpeed               |
+| Data            | JSON/JSONL/HF normalization, schema filtering, deterministic split  |
+| Reproducibility | Seed control and per-run run_manifest.json                          |
+| Artifacts       | Safe-serialization model checkpoints                                |
+| Quality         | Ruff, Black, config validation, tests, CodeQL, Terraform validation |
 
 ## Quick start
 
@@ -27,6 +37,7 @@ pip install -r requirements.txt
 ```
 
 Repository checks:
+
 ```bash
 pip install -r requirements-dev.txt
 python -m compileall -q data src
@@ -64,6 +75,7 @@ python src/train.py \
 Each run writes run_manifest.json with the model, dataset paths, seed, sequence length, dataset counts, and runtime metadata.
 
 ### Distributed / DeepSpeed
+
 ```bash
 accelerate config
 accelerate launch src/train.py \
@@ -76,6 +88,7 @@ accelerate launch src/train.py \
 ```
 
 ### Merge LoRA
+
 ```bash
 python src/merge_peft.py \
   --base_model_name "meta-llama/Meta-Llama-3-8B-Instruct" \
@@ -102,4 +115,5 @@ Never commit credentials, datasets, checkpoints, or Terraform state. Keep trust_
 See [SECURITY.md](SECURITY.md).
 
 ## License
+
 MIT — see [LICENSE](LICENSE).
